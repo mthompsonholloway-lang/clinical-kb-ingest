@@ -350,9 +350,10 @@ RULES:
 2. Approved tags and domains only
 3. NZ Tier 1 content takes precedence over international
 4. Flag non-NZ thresholds with review-required tag if NZ source should override
-5. Output ONLY the JSON array — no preamble, no markdown fences
+5. Output ONLY the raw JSON array — no preamble, no markdown fences, no backticks
 6. filename: lowercase-hyphenated.md
-7. Yield: 5-20 notes per substantive pass`;
+7. Yield: 5-20 notes per substantive pass
+8. CRITICAL JSON FORMATTING: The "content" value must be a properly escaped JSON string. Replace all newlines with \\n, all double quotes inside content with \\", all backslashes with \\\\. The entire output must be parseable by JSON.parse() with no modifications.`;
 
 const PASS2_PROMPT = `You are running a gap-fill pass on a document already partially ingested.
 Extract ONLY concepts not covered in the first pass. Do not duplicate existing notes.
@@ -531,11 +532,67 @@ async function runExtraction(isPass2=false) {
 function runPass2() { runExtraction(true); }
 
 function parseNotes(raw) {
-  const cleaned = raw.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim();
+  // Strip markdown fences
+  let cleaned = raw.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim();
   const s = cleaned.indexOf('['), e = cleaned.lastIndexOf(']');
   if (s===-1||e===-1) return [];
-  try { return JSON.parse(cleaned.slice(s,e+1)).filter(n=>n.filename&&n.content); }
-  catch(err) { console.warn('JSON parse failed:', err); return []; }
+  cleaned = cleaned.slice(s, e+1);
+
+  // First attempt: direct parse
+  try { return JSON.parse(cleaned).filter(n=>n.filename&&n.content); } catch(e1) {}
+
+  // Second attempt: fix unescaped newlines inside string values
+  // Replace literal newlines inside quoted strings with \n
+  try {
+    const fixed = cleaned.replace(/"content"\s*:\s*"([\s\S]*?)(?=",\s*(?:"|\})|"\s*\})/g, (match, p1) => {
+      const escaped = p1.replace(/\n/g,'\\n').replace(/\r/g,'').replace(/\t/g,'\\t');
+      return `"content": "${escaped}`;
+    });
+    return JSON.parse(fixed + '"').filter(n=>n.filename&&n.content);
+  } catch(e2) {}
+
+  // Third attempt: extract objects individually via regex
+  const notes = [];
+  const pattern = /\{\s*"filename"\s*:\s*"([^"]+)"\s*,\s*"domain"\s*:\s*"([^"]+)"\s*,\s*"has_qc_flags"\s*:\s*(true|false)\s*,\s*"content"\s*:\s*"([\s\S]*?)"\s*\}/g;
+  let m;
+  while ((m = pattern.exec(cleaned)) !== null) {
+    try {
+      notes.push({
+        filename: m[1],
+        domain: m[2],
+        has_qc_flags: m[3]==='true',
+        content: m[4].replace(/\\n/g,'\n').replace(/\\t/g,'\t')
+      });
+    } catch(e3) {}
+  }
+  if (notes.length) return notes;
+
+  // Fourth attempt: split on object boundaries and parse each
+  const chunks = cleaned.split(/(?<=\})\s*,\s*(?=\{)/);
+  const salvaged = [];
+  for (const chunk of chunks) {
+    const c = chunk.trim().replace(/^\[/,'').replace(/\]$/,'');
+    try {
+      const obj = JSON.parse(c);
+      if (obj.filename && obj.content) salvaged.push(obj);
+    } catch(e4) {
+      // Try extracting fields manually
+      const fn = c.match(/"filename"\s*:\s*"([^"]+)"/)?.[1];
+      const dom = c.match(/"domain"\s*:\s*"([^"]+)"/)?.[1];
+      const qc = c.match(/"has_qc_flags"\s*:\s*(true|false)/)?.[1];
+      const contentMatch = c.match(/"content"\s*:\s*"([\s\S]+)"[\s\}]*$/);
+      if (fn && contentMatch) {
+        salvaged.push({
+          filename: fn,
+          domain: dom||'eating-disorders',
+          has_qc_flags: qc==='true',
+          content: contentMatch[1].replace(/\\n/g,'\n').replace(/\\"/g,'"')
+        });
+      }
+    }
+  }
+  console.log(`Salvaged ${salvaged.length} notes via fallback parser`);
+  return salvaged;
 }
 
 function renderNotes() {
