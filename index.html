@@ -6,6 +6,7 @@
 <title>clinical-kb / ingest</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
 <style>
 :root {
   --bg: #0d0f0e; --surface: #141714; --surface2: #1c1f1c; --surface3: #242724;
@@ -62,6 +63,9 @@ button { font-family: var(--mono); font-size: 10px; font-weight: 500; letter-spa
 .dropzone-text { font-size: 11px; color: var(--text2); }
 .dropzone-text strong { color: var(--text); }
 .file-loaded { background: var(--accent-dim); border-color: var(--accent2); border-style: solid; }
+
+/* docx warning badge */
+.docx-note { display: inline-block; margin-top: 8px; padding: 4px 9px; background: var(--warn-dim); border: 1px solid var(--warn); border-radius: 3px; font-size: 9px; color: var(--warn); letter-spacing: 0.05em; }
 
 .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .meta-grid .full-width { grid-column: 1 / -1; }
@@ -146,21 +150,21 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 12px 0; 
   </div>
 </div>
 
-<!-- STEP 1 — UPLOAD PDF -->
+<!-- STEP 1 — UPLOAD FILE -->
 <div class="card" id="card-upload">
   <div class="card-header" onclick="toggleCard('upload')">
     <div class="step-num" id="step-upload">1</div>
-    <div class="card-title">Upload PDF</div>
+    <div class="card-title">Upload Document</div>
     <div class="card-status" id="status-upload">waiting</div>
   </div>
   <div class="card-body hidden" id="body-upload">
     <div class="dropzone" id="dropzone" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)">
-      <input type="file" accept=".pdf" onchange="handleFileSelect(event)">
+      <input type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onchange="handleFileSelect(event)">
       <div class="dropzone-icon">📄</div>
-      <div class="dropzone-text"><strong>Drop PDF here</strong> or click to browse</div>
+      <div class="dropzone-text"><strong>Drop PDF or DOCX here</strong> or click to browse</div>
       <div id="file-name" style="margin-top:6px;font-size:10px;color:var(--accent);"></div>
     </div>
-    <p class="footnote" style="margin-top:8px;">Read locally into memory, sent inline per API call. No external upload. ~15MB limit.</p>
+    <p class="footnote" style="margin-top:8px;">PDF: sent as inline document. DOCX: text extracted client-side via mammoth, sent as text. ~15MB limit for PDFs; DOCX size is less constrained.</p>
   </div>
 </div>
 
@@ -364,7 +368,20 @@ SCHEMA — Domains: ${SCHEMA.domains.join(', ')} | Tags: ${SCHEMA.tags.join(', '
 Note template and rules same as original extraction pass. Output ONLY JSON array.`;
 
 // ── STATE ───────────────────────────────────────────────────────
-let state = { apiKey:'', pdfBase64:null, pdfName:'', metadata:{}, pass0Output:'', notes:[], sourceNameSlug:'' };
+// fileType: 'pdf' | 'docx'
+// pdfBase64: set for PDFs
+// docxText: set for DOCX files
+let state = {
+  apiKey: '',
+  fileType: null,
+  pdfBase64: null,
+  docxText: null,
+  fileName: '',
+  metadata: {},
+  pass0Output: '',
+  notes: [],
+  sourceNameSlug: ''
+};
 
 // ── INIT ────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -403,33 +420,77 @@ function saveKey() {
 // ── STEP 1 — FILE ───────────────────────────────────────────────
 function handleDragOver(e) { e.preventDefault(); document.getElementById('dropzone').classList.add('drag-over'); }
 function handleDragLeave() { document.getElementById('dropzone').classList.remove('drag-over'); }
-function handleDrop(e) { e.preventDefault(); document.getElementById('dropzone').classList.remove('drag-over'); const f=e.dataTransfer.files[0]; if(f&&f.type==='application/pdf') loadFile(f); }
-function handleFileSelect(e) { if(e.target.files[0]) loadFile(e.target.files[0]); }
+function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('dropzone').classList.remove('drag-over');
+  const f = e.dataTransfer.files[0];
+  if (f) loadFile(f);
+}
+function handleFileSelect(e) { if (e.target.files[0]) loadFile(e.target.files[0]); }
+
+function detectFileType(file) {
+  if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) return 'pdf';
+  if (file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || file.name.toLowerCase().endsWith('.docx')) return 'docx';
+  return null;
+}
 
 async function loadFile(file) {
+  const fileType = detectFileType(file);
+  if (!fileType) {
+    alert('Unsupported file type. Please upload a PDF or DOCX file.');
+    return;
+  }
+
   const dz = document.getElementById('dropzone');
   dz.classList.add('file-loaded');
   dz.querySelector('.dropzone-icon').textContent = '⟳';
-  const mb = (file.size/1024/1024).toFixed(1);
+  const mb = (file.size / 1024 / 1024).toFixed(1);
   document.getElementById('file-name').textContent = `${file.name} (${mb} MB) — reading...`;
-  state.pdfName = file.name;
-  state.sourceNameSlug = file.name.replace(/\.pdf$/i,'').replace(/[^a-zA-Z0-9_-]/g,'-').toLowerCase();
-  document.getElementById('meta-name').value = file.name.replace(/\.pdf$/i,'');
-  if (parseFloat(mb) > 15) setStatus('upload', `⚠ ${mb}MB — may hit inline limit`, 'warn');
+
+  state.fileName = file.name;
+  state.fileType = fileType;
+  state.pdfBase64 = null;
+  state.docxText = null;
+
+  const ext = fileType === 'pdf' ? /\.pdf$/i : /\.docx$/i;
+  state.sourceNameSlug = file.name.replace(ext, '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+  document.getElementById('meta-name').value = file.name.replace(ext, '');
+
   try {
-    state.pdfBase64 = await toBase64(file);
-    dz.querySelector('.dropzone-icon').textContent = '✅';
-    document.getElementById('file-name').textContent = `${file.name} (${mb} MB)`;
-    setStep('upload','done'); setStatus('upload','✓ '+file.name,'ok');
-    setStep('meta','active'); showCard('meta');
+    if (fileType === 'pdf') {
+      if (parseFloat(mb) > 15) setStatus('upload', `⚠ ${mb}MB — may hit inline limit`, 'warn');
+      state.pdfBase64 = await toBase64(file);
+      dz.querySelector('.dropzone-icon').textContent = '✅';
+      document.getElementById('file-name').textContent = `${file.name} (${mb} MB) — PDF`;
+    } else {
+      // DOCX: extract text via mammoth
+      const arrayBuffer = await file.arrayBuffer();
+      const result = await mammoth.extractRawText({ arrayBuffer });
+      if (!result.value || result.value.trim().length < 50) {
+        throw new Error('DOCX text extraction returned empty or near-empty content. File may be image-based or protected.');
+      }
+      state.docxText = result.value;
+      const wordCount = result.value.split(/\s+/).length;
+      const warnings = result.messages.filter(m => m.type === 'warning');
+      dz.querySelector('.dropzone-icon').textContent = '✅';
+      document.getElementById('file-name').innerHTML =
+        `${file.name} (${mb} MB) — DOCX · ~${wordCount.toLocaleString()} words extracted` +
+        (warnings.length ? `<div class="docx-note">⚠ ${warnings.length} mammoth warning(s) — table formatting may be flattened. Check notes carefully.</div>` : '');
+    }
+    setStep('upload', 'done');
+    setStatus('upload', `✓ ${file.name} [${fileType.toUpperCase()}]`, 'ok');
+    setStep('meta', 'active');
+    showCard('meta');
   } catch(e) {
     dz.querySelector('.dropzone-icon').textContent = '✗';
-    setStatus('upload','✗ read failed','');
+    document.getElementById('file-name').textContent = `Error: ${e.message}`;
+    setStatus('upload', '✗ read failed', '');
+    console.error('File load error:', e);
   }
 }
 
 function toBase64(file) {
-  return new Promise((res,rej) => {
+  return new Promise((res, rej) => {
     const r = new FileReader();
     r.onload = () => res(r.result.split(',')[1]);
     r.onerror = () => rej(new Error('FileReader failed'));
@@ -447,28 +508,28 @@ function proceedToPass0() {
     citation: document.getElementById('meta-citation').value.trim() || name,
     nzNote: document.getElementById('meta-nz').value,
     pass: document.getElementById('meta-pass').value,
-    mocs: Array.from(document.querySelectorAll('#moc-checkboxes input:checked')).map(c=>c.value)
+    mocs: Array.from(document.querySelectorAll('#moc-checkboxes input:checked')).map(c => c.value)
   };
-  setStep('meta','done'); setStatus('meta','✓ '+name+' · T'+tier,'ok');
-  setStep('pass0','active'); showCard('pass0');
+  setStep('meta', 'done'); setStatus('meta', '✓ ' + name + ' · T' + tier, 'ok');
+  setStep('pass0', 'active'); showCard('pass0');
 }
 
 // ── STEP 3 — PASS 0 ─────────────────────────────────────────────
 async function runPass0() {
-  if (!state.pdfBase64) { setAlert('pass0','PDF not loaded.','warn'); return; }
+  if (!state.pdfBase64 && !state.docxText) { setAlert('pass0', 'Document not loaded.', 'warn'); return; }
   const btn = document.getElementById('btn-run-pass0');
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Mapping...';
-  setAlert('pass0',''); setStatus('pass0','⟳ mapping','warn');
+  setAlert('pass0', ''); setStatus('pass0', '⟳ mapping', 'warn');
   const mocs = state.metadata.mocs.length ? state.metadata.mocs.join(', ') : SCHEMA.mocs.join(', ');
   const msg = `Document: ${state.metadata.name} (Tier ${state.metadata.tier})\nNZ applicability: ${state.metadata.nzNote}\nTarget MOCs: ${mocs}\nPass: ${state.metadata.pass}\n\nMap this document and produce the extraction brief.`;
   try {
     const result = await callGemini(PASS0_PROMPT, msg, true);
     document.getElementById('pass0-output').textContent = result;
     state.pass0Output = result;
-    setStep('pass0','done'); setStatus('pass0','✓ mapped','ok');
+    setStep('pass0', 'done'); setStatus('pass0', '✓ mapped', 'ok');
     document.getElementById('btn-proceed-extract').disabled = false;
   } catch(e) {
-    setAlert('pass0','Error: '+e.message,'error'); setStatus('pass0','✗ failed','');
+    setAlert('pass0', 'Error: ' + e.message, 'error'); setStatus('pass0', '✗ failed', '');
   }
   btn.disabled = false; btn.textContent = 'Re-run Pass 0';
 }
@@ -476,28 +537,28 @@ async function runPass0() {
 function skipPass0() {
   state.pass0Output = 'Pass 0 skipped. Full extraction requested.';
   document.getElementById('pass0-output').textContent = state.pass0Output;
-  setStep('pass0','done'); setStatus('pass0','— skipped','');
+  setStep('pass0', 'done'); setStatus('pass0', '— skipped', '');
   document.getElementById('btn-proceed-extract').disabled = false;
 }
 
 function proceedToExtract() {
   state.pass0Output = document.getElementById('pass0-output').textContent;
-  setStep('extract','active'); showCard('extract');
+  setStep('extract', 'active'); showCard('extract');
 }
 
 // ── STEP 4 — EXTRACTION ──────────────────────────────────────────
 async function runExtraction(isPass2=false) {
-  if (!state.pdfBase64) { setAlert('extract','PDF not loaded.','warn'); return; }
+  if (!state.pdfBase64 && !state.docxText) { setAlert('extract', 'Document not loaded.', 'warn'); return; }
   const btnId = isPass2 ? 'btn-run-pass2' : 'btn-run-extract';
   const btn = document.getElementById(btnId);
-  btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>${isPass2?'Gap fill...':'Extracting...'}`;
-  setAlert('extract','');
+  btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>${isPass2 ? 'Gap fill...' : 'Extracting...'}`;
+  setAlert('extract', '');
   document.getElementById('extract-progress-bar').style.display = 'block';
   animateProgress(0, 75, 12000);
-  setStatus('extract','⟳ extracting','warn');
+  setStatus('extract', '⟳ extracting', 'warn');
 
   const sysPrompt = isPass2 ? PASS2_PROMPT : EXTRACT_PROMPT;
-  const prevNotes = isPass2 ? `\nPreviously extracted (${state.notes.length} notes): ${state.notes.map(n=>n.filename).join(', ')}` : '';
+  const prevNotes = isPass2 ? `\nPreviously extracted (${state.notes.length} notes): ${state.notes.map(n => n.filename).join(', ')}` : '';
   const msg = `Document: ${state.metadata.name} (Tier ${state.metadata.tier})\nCitation: ${state.metadata.citation}\nNZ applicability: ${state.metadata.nzNote}\nTarget MOCs: ${state.metadata.mocs.length ? state.metadata.mocs.join(', ') : 'all relevant'}\nPass: ${state.metadata.pass}${prevNotes}\n\nPass 0 brief:\n${state.pass0Output}\n\nExtract all relevant atomic concept notes. Output JSON array only.`;
 
   try {
@@ -509,20 +570,20 @@ async function runExtraction(isPass2=false) {
     } else {
       state.notes = isPass2 ? [...state.notes, ...newNotes] : newNotes;
       renderNotes();
-      setStep('extract','done'); setStatus('extract','✓ '+state.notes.length+' notes','ok');
+      setStep('extract', 'done'); setStatus('extract', '✓ ' + state.notes.length + ' notes', 'ok');
       document.getElementById('btn-run-pass2').disabled = false;
       document.getElementById('extract-footnote').style.display = 'block';
       document.getElementById('extract-stats').style.display = 'flex';
       document.getElementById('stat-count').textContent = state.notes.length;
-      document.getElementById('stat-qc').textContent = state.notes.filter(n=>n.has_qc_flags).length;
-      document.getElementById('stat-domains').textContent = new Set(state.notes.map(n=>n.domain).filter(Boolean)).size;
-      setStep('download','active'); showCard('download'); renderDownloadSummary();
+      document.getElementById('stat-qc').textContent = state.notes.filter(n => n.has_qc_flags).length;
+      document.getElementById('stat-domains').textContent = new Set(state.notes.map(n => n.domain).filter(Boolean)).size;
+      setStep('download', 'active'); showCard('download'); renderDownloadSummary();
       document.getElementById('btn-download').disabled = false;
-      setStatus('download', state.notes.length+' notes ready','ok');
+      setStatus('download', state.notes.length + ' notes ready', 'ok');
     }
     animateProgress(75, 100, 400);
   } catch(e) {
-    setAlert('extract','Error: '+e.message,'error'); setStatus('extract','✗ failed','');
+    setAlert('extract', 'Error: ' + e.message, 'error'); setStatus('extract', '✗ failed', '');
     console.error(e);
   }
   btn.disabled = false;
@@ -532,18 +593,12 @@ async function runExtraction(isPass2=false) {
 function runPass2() { runExtraction(true); }
 
 function parseNotes(raw) {
-  // Strip markdown fences
-  let cleaned = raw.replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/```\s*$/,'').trim();
-
-  // Find the JSON array boundaries
+  let cleaned = raw.replace(/^```json\s*/, '').replace(/^```\s*/, '').replace(/```\s*$/, '').trim();
   const s = cleaned.indexOf('[');
   const e = cleaned.lastIndexOf(']');
   if (s === -1 || e === -1) { console.warn('No JSON array found'); return []; }
   cleaned = cleaned.slice(s, e + 1);
 
-  // Fix unescaped newlines/tabs inside JSON string values.
-  // Strategy: walk char by char, track whether we're inside a string,
-  // and when inside a string replace bare \n \r \t with escaped versions.
   function fixJsonStrings(str) {
     let out = '';
     let inString = false;
@@ -564,12 +619,10 @@ function parseNotes(raw) {
   }
 
   const fixed = fixJsonStrings(cleaned);
-
   try {
     const arr = JSON.parse(fixed);
     return arr.filter(n => n.filename && n.content).map(n => ({
       ...n,
-      // Restore actual newlines in content for display/download
       content: n.content.replace(/\\n/g, '\n').replace(/\\t/g, '\t')
     }));
   } catch(err) {
@@ -588,7 +641,7 @@ function renderNotes() {
     card.innerHTML = `
       <div class="note-card-header" onclick="toggleNote(${i})">
         <div class="note-filename">${note.filename}</div>
-        <div class="note-domain">${note.domain||'—'}</div>
+        <div class="note-domain">${note.domain || '—'}</div>
         ${note.has_qc_flags ? '<span class="qc-flag qc-review">QC</span>' : '<span class="qc-flag qc-ok">clean</span>'}
         <div class="note-toggle" id="nt-${i}">▶</div>
       </div>
@@ -604,24 +657,24 @@ function toggleNote(i) {
 
 // ── STEP 5 — DOWNLOAD ────────────────────────────────────────────
 function renderDownloadSummary() {
-  const qc = state.notes.filter(n=>n.has_qc_flags).length;
-  const domains = [...new Set(state.notes.map(n=>n.domain).filter(Boolean))];
+  const qc = state.notes.filter(n => n.has_qc_flags).length;
+  const domains = [...new Set(state.notes.map(n => n.domain).filter(Boolean))];
   document.getElementById('download-summary').innerHTML = `
     <div class="alert alert-ok">
       <div><strong>${state.notes.length} concept notes</strong> ready.
       ${qc > 0 ? `<span class="qc-flag qc-review">${qc} QC flags</span> — review in Obsidian before promoting.` : ' No QC flags.'}
-      <br><br>Domains: ${domains.map(d=>`<span class="pill">${d}</span>`).join('')}</div>
+      <br><br>Domains: ${domains.map(d => `<span class="pill">${d}</span>`).join('')}</div>
     </div>
     <div class="section-label">ZIP contents</div>
-    <div class="output-area" style="max-height:100px;">${state.notes.map(n=>n.filename).join('\n')}\n_summary-${state.metadata.name||'source'}.md</div>`;
+    <div class="output-area" style="max-height:100px;">${state.notes.map(n => n.filename).join('\n')}\n_summary-${state.metadata.name || 'source'}.md</div>`;
 }
 
 async function downloadZip() {
   const zip = new JSZip();
   state.notes.forEach(n => zip.file(n.filename, n.content));
   const dc = {};
-  state.notes.forEach(n => { if(n.domain) dc[n.domain]=(dc[n.domain]||0)+1; });
-  const qcList = state.notes.filter(n=>n.has_qc_flags).map(n=>`- ${n.filename}`).join('\n');
+  state.notes.forEach(n => { if (n.domain) dc[n.domain] = (dc[n.domain] || 0) + 1; });
+  const qcList = state.notes.filter(n => n.has_qc_flags).map(n => `- ${n.filename}`).join('\n');
   const summary = `---
 source: ${state.metadata.name}
 tier: ${state.metadata.tier}
@@ -629,81 +682,97 @@ citation: ${state.metadata.citation}
 nz-applicability: ${state.metadata.nzNote}
 ingest-date: ${TODAY}
 pass: ${state.metadata.pass}
+file-type: ${state.fileType}
 moc-targets: [${state.metadata.mocs.join(', ')}]
 notes-generated: ${state.notes.length}
-qc-flags: ${state.notes.filter(n=>n.has_qc_flags).length}
+qc-flags: ${state.notes.filter(n => n.has_qc_flags).length}
 ingest-status: inbox-pending
 ---
 
 ## Extraction Summary
 
-Source: ${state.metadata.name} | Date: ${TODAY} | Notes: ${state.notes.length}
-
+Source: ${state.metadata.name} | Date: ${TODAY} | Notes: ${state.notes.length} | File type: ${state.fileType.toUpperCase()}
+${state.fileType === 'docx' ? '\n⚠ DOCX source — table content may have been flattened during text extraction. Verify structured data (criteria tables, threshold tables) against source document.\n' : ''}
 ## Notes by Domain
 
-${Object.entries(dc).map(([d,c])=>`${d}: ${c}`).join('\n')}
+${Object.entries(dc).map(([d, c]) => `${d}: ${c}`).join('\n')}
 
 ## Notes Generated
 
-${state.notes.map(n=>`- [[${n.filename.replace('.md','')}]]${n.has_qc_flags?' ⚠ QC':''}`).join('\n')}
+${state.notes.map(n => `- [[${n.filename.replace('.md', '')}]]${n.has_qc_flags ? ' ⚠ QC' : ''}`).join('\n')}
 
 ## QC Flags — Review Required
 
-${qcList||'None'}
+${qcList || 'None'}
 
 ## Pass 0 Brief
 
 ${state.pass0Output}`;
 
-  zip.file(`_summary-${state.metadata.name||state.sourceNameSlug}.md`, summary);
-  const blob = await zip.generateAsync({type:'blob'});
+  zip.file(`_summary-${state.metadata.name || state.sourceNameSlug}.md`, summary);
+  const blob = await zip.generateAsync({ type: 'blob' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `clinical-kb-inbox-${(state.metadata.name||'source').replace(/[^a-zA-Z0-9]/g,'-')}-${TODAY}.zip`;
+  a.download = `clinical-kb-inbox-${(state.metadata.name || 'source').replace(/[^a-zA-Z0-9]/g, '-')}-${TODAY}.zip`;
   a.click();
   URL.revokeObjectURL(url);
-  setStatus('download','✓ downloaded','ok');
+  setStatus('download', '✓ downloaded', 'ok');
 }
 
 // ── GEMINI API ───────────────────────────────────────────────────
 async function callGemini(systemPrompt, userMessage, withFile=false) {
-  const MODELS = ['gemini-2.5-flash','gemini-2.0-flash','gemini-2.5-flash-lite'];
+  const MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
+
   const buildContents = () => {
-    if (withFile && state.pdfBase64) {
-      return [{ role:'user', parts:[
-        { inline_data:{ mime_type:'application/pdf', data:state.pdfBase64 } },
+    // PDF: send as inline document part (native semantic understanding)
+    if (withFile && state.fileType === 'pdf' && state.pdfBase64) {
+      return [{ role: 'user', parts: [
+        { inline_data: { mime_type: 'application/pdf', data: state.pdfBase64 } },
         { text: userMessage }
       ]}];
     }
-    return [{ role:'user', parts:[{ text: userMessage }] }];
+    // DOCX: mammoth-extracted text prepended to the message
+    if (withFile && state.fileType === 'docx' && state.docxText) {
+      // Truncate if very large to avoid token ceiling; ~800k chars ≈ ~200k tokens
+      const MAX_CHARS = 800000;
+      const text = state.docxText.length > MAX_CHARS
+        ? state.docxText.slice(0, MAX_CHARS) + '\n\n[DOCUMENT TRUNCATED AT 800K CHARS]'
+        : state.docxText;
+      return [{ role: 'user', parts: [
+        { text: `DOCUMENT TEXT (extracted from DOCX):\n\n${text}\n\n---\n\n${userMessage}` }
+      ]}];
+    }
+    // No file (text-only call)
+    return [{ role: 'user', parts: [{ text: userMessage }] }];
   };
+
   for (const model of MODELS) {
     try {
       const resp = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${state.apiKey}`,
-        { method:'POST', headers:{'Content-Type':'application/json'},
+        { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            system_instruction:{ parts:[{ text: systemPrompt }] },
+            system_instruction: { parts: [{ text: systemPrompt }] },
             contents: buildContents(),
-            generationConfig:{ temperature:0.2, maxOutputTokens:8192 }
+            generationConfig: { temperature: 0.2, maxOutputTokens: 8192 }
           })
         }
       );
-      if (resp.status===503||resp.status===429) { console.warn(`${model} ${resp.status}, trying fallback`); continue; }
+      if (resp.status === 503 || resp.status === 429) { console.warn(`${model} ${resp.status}, trying fallback`); continue; }
       if (!resp.ok) throw new Error(`API ${resp.status}: ${await resp.text()}`);
       const data = await resp.json();
       if (!data.candidates?.[0]?.content?.parts?.[0]) throw new Error('Empty response');
-      return data.candidates[0].content.parts.map(p=>p.text||'').join('');
+      return data.candidates[0].content.parts.map(p => p.text || '').join('');
     } catch(e) {
-      if (model===MODELS[MODELS.length-1]) throw e;
+      if (model === MODELS[MODELS.length - 1]) throw e;
       console.warn(`${model} failed:`, e.message);
     }
   }
   throw new Error('All models failed');
 }
 
-function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 </script>
 </body>
 </html>
