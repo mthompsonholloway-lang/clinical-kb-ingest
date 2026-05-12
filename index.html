@@ -363,21 +363,51 @@ RULES:
 6. Yield: 5-20 notes per substantive pass
 7. Output ONLY the delimited notes — no preamble, no summary, nothing outside the delimiters`;
 
-const PASS2_PROMPT = `You are running a gap-fill pass on a document already partially ingested.
-Extract ONLY concepts not covered in the first pass. Do not duplicate existing notes.
-Focus on: missed clinical criteria/thresholds, assessment tools, NZ-specific operational content, concepts flagged in Pass 0 brief but not extracted.
+const PASS2_PROMPT = `You are running a gap-fill pass on a document already partially ingested into a clinical knowledge base.
+Extract ONLY concepts not already covered. Do not duplicate existing notes.
+Focus on: missed clinical criteria/thresholds, assessment tools, NZ-specific operational content, therapeutic frameworks, concepts flagged in Pass 0 brief but not yet extracted.
 
-Use EXACTLY the same delimiter format:
+Use EXACTLY this delimiter format — one block per concept:
 ===NOTE_START===
-FILENAME: ...
-DOMAIN: ...
+FILENAME: short-concept-slug.md
+DOMAIN: domain-name
 HAS_QC_FLAGS: true/false
 CONTENT:
-[full note markdown]
+---
+title: Concept Name
+type: concept
+domain: domain-name
+tags: []
+linked-presentations: []
+mechanism-type: physiological
+evidence-base: moderate
+sources: ["Source Name, TierN"]
+last-reviewed: ${TODAY}
+status: draft
+---
+
+## Definition / Description
+
+## Clinical Presentation / Features
+
+## Relevant Thresholds / Criteria
+
+## NZ Context
+
+## Treatment / Management Implications
+
+## QC Flags
+NONE
+
+## Wikilinks
 ===NOTE_END===
 
-SCHEMA — Domains: ${SCHEMA.domains.join(', ')} | Tags: ${SCHEMA.tags.join(', ')}
-Output ONLY delimited notes — no preamble, no JSON, no other text.`;
+CRITICAL RULES:
+1. FILENAME must be a short lowercase-hyphenated concept slug — e.g. motivational-enhancement-se-an.md — NEVER the book title
+2. One atomic concept per note
+3. Approved domains only: ${SCHEMA.domains.join(', ')}
+4. Approved tags only: ${SCHEMA.tags.join(', ')}
+5. Output ONLY the delimited notes — no preamble, no JSON, nothing else`;
 
 // ── STATE ───────────────────────────────────────────────────────
 let state = {
@@ -756,7 +786,7 @@ async function callGemini(systemPrompt, userMessage, withFile=false) {
           body: JSON.stringify({
             system_instruction: { parts: [{ text: systemPrompt }] },
             contents: buildContents(),
-            generationConfig: { temperature: 0.2, maxOutputTokens: 8192 }
+            generationConfig: { temperature: 0.2, maxOutputTokens: 65536 }
           })
         }
       );
