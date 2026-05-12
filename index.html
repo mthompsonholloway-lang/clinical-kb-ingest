@@ -316,25 +316,28 @@ Domains: ${SCHEMA.domains.join(', ')}
 Tags (ONLY from this list): ${SCHEMA.tags.join(', ')}
 MOCs: ${SCHEMA.mocs.join(', ')}
 
-Produce one JSON array of concept notes. Each note:
-{"filename":"concept-name.md","domain":"domain-name","has_qc_flags":true/false,"content":"full markdown note content"}
+Output each concept note using EXACTLY this delimiter format. No JSON. No other text outside delimiters.
 
-Note content template:
+===NOTE_START===
+FILENAME: concept-name.md
+DOMAIN: domain-name
+HAS_QC_FLAGS: true
+CONTENT:
 ---
-title: [concept name]
+title: Concept Name
 type: concept
-domain: [single approved domain]
-tags: [approved tags only]
+domain: domain-name
+tags: [tag1, tag2]
 linked-presentations: []
-mechanism-type: [physiological|psychological|procedural|criteria-based]
-evidence-base: [high|moderate|limited|NZ-operational]
-sources: ["sourceName, tierN"]
-last-reviewed: ${TODAY}
+mechanism-type: physiological
+evidence-base: moderate
+sources: ["Source Name, Tier4"]
+last-reviewed: ' + TODAY + '
 status: draft
 ---
 
 ## Definition / Description
-[2-4 sentences]
+2-4 sentences.
 
 ## Clinical Presentation / Features
 
@@ -346,27 +349,35 @@ status: draft
 ## Treatment / Management Implications
 
 ## QC Flags
-[Specific thresholds needing tier-1 cross-check. NONE if clean.]
+NONE
 
 ## Wikilinks
+===NOTE_END===
 
 RULES:
 1. One atomic concept per note
 2. Approved tags and domains only
 3. NZ Tier 1 content takes precedence over international
-4. Flag non-NZ thresholds with review-required tag if NZ source should override
-5. Output ONLY the raw JSON array — no preamble, no markdown fences, no backticks
-6. filename: lowercase-hyphenated.md
-7. Yield: 5-20 notes per substantive pass
-8. CRITICAL JSON FORMATTING: The "content" value must be a properly escaped JSON string. Replace all newlines with \\n, all double quotes inside content with \\", all backslashes with \\\\. The entire output must be parseable by JSON.parse() with no modifications.`;
+4. Add review-required tag and set HAS_QC_FLAGS: true for non-NZ thresholds needing cross-check
+5. filename: lowercase-hyphenated.md
+6. Yield: 5-20 notes per substantive pass
+7. Output ONLY the delimited notes — no preamble, no summary, nothing outside the delimiters`;
 
 const PASS2_PROMPT = `You are running a gap-fill pass on a document already partially ingested.
 Extract ONLY concepts not covered in the first pass. Do not duplicate existing notes.
 Focus on: missed clinical criteria/thresholds, assessment tools, NZ-specific operational content, concepts flagged in Pass 0 brief but not extracted.
-Apply all rules from the original extraction. Output JSON array only.
 
-SCHEMA — Domains: ${SCHEMA.domains.join(', ')} | Tags: ${SCHEMA.tags.join(', ')} | MOCs: ${SCHEMA.mocs.join(', ')}
-Note template and rules same as original extraction pass. Output ONLY JSON array.`;
+Use EXACTLY the same delimiter format:
+===NOTE_START===
+FILENAME: ...
+DOMAIN: ...
+HAS_QC_FLAGS: true/false
+CONTENT:
+[full note markdown]
+===NOTE_END===
+
+SCHEMA — Domains: ${SCHEMA.domains.join(', ')} | Tags: ${SCHEMA.tags.join(', ')}
+Output ONLY delimited notes — no preamble, no JSON, no other text.`;
 
 // ── STATE ───────────────────────────────────────────────────────
 let state = {
@@ -569,7 +580,7 @@ async function runExtraction(isPass2=false) {
     const raw = await callGemini(sysPrompt, msg, true);
     const newNotes = parseNotes(raw);
     if (!newNotes.length) {
-      setAlert('extract', 'No notes parsed. Check console for raw output — model may have returned malformed JSON.', 'warn');
+      setAlert('extract', 'No notes parsed. Check console — model output may not contain ===NOTE_START=== delimiters.', 'warn');
       console.log('Raw output:', raw);
     } else {
       state.notes = isPass2 ? [...state.notes, ...newNotes] : newNotes;
@@ -597,44 +608,34 @@ async function runExtraction(isPass2=false) {
 function runPass2() { runExtraction(true); }
 
 function parseNotes(raw) {
-  let cleaned = raw.replace(/^```json\s*/, '').replace(/^```\s*/, '').replace(/```\s*$/, '').trim();
-  const s = cleaned.indexOf('[');
-  const e = cleaned.lastIndexOf(']');
-  if (s === -1 || e === -1) { console.warn('No JSON array found'); return []; }
-  cleaned = cleaned.slice(s, e + 1);
+  const notes = [];
+  const noteBlocks = raw.split('===NOTE_START===').slice(1);
+  for (const block of noteBlocks) {
+    const endIdx = block.indexOf('===NOTE_END===');
+    if (endIdx === -1) continue;
+    const inner = block.slice(0, endIdx).trim();
 
-  function fixJsonStrings(str) {
-    let out = '';
-    let inString = false;
-    let escaped = false;
-    for (let i = 0; i < str.length; i++) {
-      const ch = str[i];
-      if (escaped) { out += ch; escaped = false; continue; }
-      if (ch === '\\') { out += ch; escaped = true; continue; }
-      if (ch === '"') { inString = !inString; out += ch; continue; }
-      if (inString) {
-        if (ch === '\n') { out += '\\n'; continue; }
-        if (ch === '\r') { out += '\\r'; continue; }
-        if (ch === '\t') { out += '\\t'; continue; }
-      }
-      out += ch;
-    }
-    return out;
-  }
+    const filenameMatch = inner.match(/^FILENAME:\s*(.+)$/m);
+    const domainMatch   = inner.match(/^DOMAIN:\s*(.+)$/m);
+    const qcMatch       = inner.match(/^HAS_QC_FLAGS:\s*(true|false)/m);
+    const contentMatch  = inner.match(/^CONTENT:\s*\n([\s\S]+)$/m);
 
-  const fixed = fixJsonStrings(cleaned);
-  try {
-    const arr = JSON.parse(fixed);
-    return arr.filter(n => n.filename && n.content).map(n => ({
-      ...n,
-      content: n.content.replace(/\\n/g, '\n').replace(/\\t/g, '\t')
-    }));
-  } catch(err) {
-    console.warn('JSON parse failed after fix attempt:', err);
-    console.log('Fixed string sample:', fixed.slice(0, 500));
-    return [];
+    if (!filenameMatch || !contentMatch) { console.warn('Skipping malformed note block'); continue; }
+
+    notes.push({
+      filename:     filenameMatch[1].trim(),
+      domain:       domainMatch ? domainMatch[1].trim() : '',
+      has_qc_flags: qcMatch ? qcMatch[1] === 'true' : false,
+      content:      contentMatch[1].trim()
+    });
   }
+  if (!notes.length) {
+    console.warn('No delimited notes found in output');
+    console.log('Raw output:', raw.slice(0, 800));
+  }
+  return notes;
 }
+
 
 function renderNotes() {
   const c = document.getElementById('notes-container');
