@@ -230,13 +230,14 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 12px 0; 
   </div>
   <div class="card-body hidden" id="body-pass0">
     <div id="alert-pass0"></div>
-    <label>Extraction brief — edit before proceeding</label>
-    <div id="pass0-output" class="output-area editable" contenteditable="true"></div>
+    <label>Extraction brief — paste AI Studio output, run Pass 0, or skip</label>
+    <div id="pass0-output" class="output-area editable" contenteditable="true" oninput="onPass0Input()" placeholder="Paste AI Studio Pass 0 output here, or run Pass 0 below..."></div>
     <div class="btn-row">
       <button class="btn-primary" id="btn-run-pass0" onclick="runPass0()">Run Pass 0</button>
       <button class="btn-secondary" onclick="skipPass0()">Skip (short doc)</button>
       <button class="btn-secondary" id="btn-proceed-extract" onclick="proceedToExtract()" disabled>Proceed to Extraction →</button>
     </div>
+    <p class="footnote">Paste a brief from AI Studio to skip the in-tool Pass 0 run — useful for large files pre-mapped externally.</p>
   </div>
 </div>
 
@@ -368,9 +369,6 @@ SCHEMA — Domains: ${SCHEMA.domains.join(', ')} | Tags: ${SCHEMA.tags.join(', '
 Note template and rules same as original extraction pass. Output ONLY JSON array.`;
 
 // ── STATE ───────────────────────────────────────────────────────
-// fileType: 'pdf' | 'docx'
-// pdfBase64: set for PDFs
-// docxText: set for DOCX files
 let state = {
   apiKey: '',
   fileType: null,
@@ -463,7 +461,6 @@ async function loadFile(file) {
       dz.querySelector('.dropzone-icon').textContent = '✅';
       document.getElementById('file-name').textContent = `${file.name} (${mb} MB) — PDF`;
     } else {
-      // DOCX: extract text via mammoth
       const arrayBuffer = await file.arrayBuffer();
       const result = await mammoth.extractRawText({ arrayBuffer });
       if (!result.value || result.value.trim().length < 50) {
@@ -515,6 +512,13 @@ function proceedToPass0() {
 }
 
 // ── STEP 3 — PASS 0 ─────────────────────────────────────────────
+
+// Fires on any input to the brief textarea — enables Proceed whenever content is present
+function onPass0Input() {
+  const content = document.getElementById('pass0-output').textContent.trim();
+  document.getElementById('btn-proceed-extract').disabled = content.length === 0;
+}
+
 async function runPass0() {
   if (!state.pdfBase64 && !state.docxText) { setAlert('pass0', 'Document not loaded.', 'warn'); return; }
   const btn = document.getElementById('btn-run-pass0');
@@ -725,16 +729,13 @@ async function callGemini(systemPrompt, userMessage, withFile=false) {
   const MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
 
   const buildContents = () => {
-    // PDF: send as inline document part (native semantic understanding)
     if (withFile && state.fileType === 'pdf' && state.pdfBase64) {
       return [{ role: 'user', parts: [
         { inline_data: { mime_type: 'application/pdf', data: state.pdfBase64 } },
         { text: userMessage }
       ]}];
     }
-    // DOCX: mammoth-extracted text prepended to the message
     if (withFile && state.fileType === 'docx' && state.docxText) {
-      // Truncate if very large to avoid token ceiling; ~800k chars ≈ ~200k tokens
       const MAX_CHARS = 800000;
       const text = state.docxText.length > MAX_CHARS
         ? state.docxText.slice(0, MAX_CHARS) + '\n\n[DOCUMENT TRUNCATED AT 800K CHARS]'
@@ -743,7 +744,6 @@ async function callGemini(systemPrompt, userMessage, withFile=false) {
         { text: `DOCUMENT TEXT (extracted from DOCX):\n\n${text}\n\n---\n\n${userMessage}` }
       ]}];
     }
-    // No file (text-only call)
     return [{ role: 'user', parts: [{ text: userMessage }] }];
   };
 
