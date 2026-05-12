@@ -231,7 +231,7 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 12px 0; 
   <div class="card-body hidden" id="body-pass0">
     <div id="alert-pass0"></div>
     <label>Extraction brief — paste AI Studio output, run Pass 0, or skip</label>
-    <div id="pass0-output" class="output-area editable" contenteditable="true" oninput="onPass0Input()" placeholder="Paste AI Studio Pass 0 output here, or run Pass 0 below..."></div>
+    <textarea id="pass0-output" class="output-area" style="min-height:160px;resize:vertical;" oninput="onPass0Input()" placeholder="Paste AI Studio Pass 0 output here, or run Pass 0 below..."></textarea>
     <div class="btn-row">
       <button class="btn-primary" id="btn-run-pass0" onclick="runPass0()">Run Pass 0</button>
       <button class="btn-secondary" onclick="skipPass0()">Skip (short doc)</button>
@@ -515,7 +515,7 @@ function proceedToPass0() {
 
 // Fires on any input to the brief textarea — enables Proceed whenever content is present
 function onPass0Input() {
-  const content = document.getElementById('pass0-output').textContent.trim();
+  const content = document.getElementById('pass0-output').value.trim();
   document.getElementById('btn-proceed-extract').disabled = content.length === 0;
 }
 
@@ -528,7 +528,7 @@ async function runPass0() {
   const msg = `Document: ${state.metadata.name} (Tier ${state.metadata.tier})\nNZ applicability: ${state.metadata.nzNote}\nTarget MOCs: ${mocs}\nPass: ${state.metadata.pass}\n\nMap this document and produce the extraction brief.`;
   try {
     const result = await callGemini(PASS0_PROMPT, msg, true);
-    document.getElementById('pass0-output').textContent = result;
+    document.getElementById('pass0-output').value = result;
     state.pass0Output = result;
     setStep('pass0', 'done'); setStatus('pass0', '✓ mapped', 'ok');
     document.getElementById('btn-proceed-extract').disabled = false;
@@ -540,13 +540,13 @@ async function runPass0() {
 
 function skipPass0() {
   state.pass0Output = 'Pass 0 skipped. Full extraction requested.';
-  document.getElementById('pass0-output').textContent = state.pass0Output;
+  document.getElementById('pass0-output').value = state.pass0Output;
   setStep('pass0', 'done'); setStatus('pass0', '— skipped', '');
   document.getElementById('btn-proceed-extract').disabled = false;
 }
 
 function proceedToExtract() {
-  state.pass0Output = document.getElementById('pass0-output').textContent;
+  state.pass0Output = document.getElementById('pass0-output').value;
   setStep('extract', 'active'); showCard('extract');
 }
 
